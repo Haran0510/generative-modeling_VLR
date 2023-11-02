@@ -7,6 +7,8 @@ from torchvision import transforms
 from torchvision.utils import save_image
 from PIL import Image
 from torchvision.datasets import VisionDataset
+import random 
+
 
 
 def build_transforms():
@@ -28,8 +30,10 @@ def get_optimizers_and_schedulers(gen, disc):
     # The learning rate for the generator should be decayed to 0 over
     # 100K iterations.
     ##################################################################
-    scheduler_discriminator = None
-    scheduler_generator = None
+
+    scheduler_discriminator = torch.optim.lr_scheduler.LambdaLR(optim_discriminator, lr_lambda = lambda iters: max(0.0, 1 - iters / 500000))
+    scheduler_generator = torch.optim.lr_scheduler.LambdaLR(optim_generator, lr_lambda = lambda iters: max(0.0, 1 - iters / 100000))
+
     ##################################################################
     #                          END OF YOUR CODE                      #
     ##################################################################
@@ -55,7 +59,6 @@ class Dataset(VisionDataset):
 
     def __len__(self):
         return len(self.file_names)
-
 
 def train_model(
     gen,
@@ -105,8 +108,11 @@ def train_model(
                 # 2. Compute discriminator output on the train batch.
                 # 3. Compute the discriminator output on the generated data.
                 ##################################################################
-                discrim_real = None
-                discrim_fake = None
+                gen_samples = gen(train_batch.size(0)).cuda()
+
+                discrim_real = disc(train_batch)
+
+                discrim_fake = disc(gen_samples)
                 ##################################################################
                 #                          END OF YOUR CODE                      #
                 ##################################################################
@@ -115,8 +121,17 @@ def train_model(
                 # TODO 1.5 Compute the interpolated batch and run the
                 # discriminator on it.
                 ###################################################################
-                interp = None
-                discrim_interp = None
+
+                eps = torch.rand(train_batch.size(0), 1, 1, 1).to(train_batch.device)
+
+                # print(train_batch.size(0))
+                # print(eps.size())
+              
+                interp = (eps)*train_batch + (1-eps)*gen_samples
+                #interp = torch.randn(train_batch.size()).cuda()
+                interp.requires_grad_()
+                discrim_interp = disc(interp)
+
                 ##################################################################
                 #                          END OF YOUR CODE                      #
                 ##################################################################
@@ -129,6 +144,8 @@ def train_model(
             scaler.scale(discriminator_loss).backward()
             scaler.step(optim_discriminator)
             scheduler_discriminator.step()
+            
+            #print(scheduler_discriminator.get_lr()[0])
 
             if iters % 5 == 0:
                 with torch.cuda.amp.autocast(enabled=amp_enabled):
@@ -136,8 +153,8 @@ def train_model(
                     # TODO 1.2: Compute generator and discriminator output on
                     # generated data.
                     ###################################################################
-                    fake_batch = None
-                    discrim_fake = None
+                    fake_batch = gen(batch_size).cuda()
+                    discrim_fake = disc(fake_batch)
                     ##################################################################
                     #                          END OF YOUR CODE                      #
                     ##################################################################
@@ -156,7 +173,11 @@ def train_model(
                         # TODO 1.2: Generate samples using the generator.
                         # Make sure they lie in the range [0, 1]!
                         ##################################################################
-                        generated_samples = None
+                        
+                        generated_samples = gen(100).cuda()
+
+                        generated_samples = (generated_samples + 1)/2
+
                         ##################################################################
                         #                          END OF YOUR CODE                      #
                         ##################################################################

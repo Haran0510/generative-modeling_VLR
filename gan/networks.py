@@ -17,6 +17,7 @@ class UpSampleConv2D(torch.jit.ScriptModule):
             input_channels, n_filters, kernel_size=kernel_size, padding=padding
         )
         self.upscale_factor = upscale_factor
+        self.pixelshuffle = nn.PixelShuffle(self.upscale_factor)
 
     @torch.jit.script_method
     def forward(self, x):
@@ -27,7 +28,13 @@ class UpSampleConv2D(torch.jit.ScriptModule):
         # (batch, channel, height*upscale_factor, width*upscale_factor)
         # 3. Apply convolution and return output
         ##################################################################
-        pass
+
+        x = x.repeat(1, self.upscale_factor*self.upscale_factor, 1, 1)
+
+        x = self.pixelshuffle(x)
+
+        return self.conv(x)
+        
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -39,9 +46,11 @@ class DownSampleConv2D(torch.jit.ScriptModule):
     ):
         super(DownSampleConv2D, self).__init__()
         self.conv = nn.Conv2d(
-            input_channels, n_filters, kernel_size=kernel_size, padding=padding
+            input_channels, n_filters, kernel_size=kernel_size, padding=padding, stride=1
         )
         self.downscale_ratio = downscale_ratio
+
+        self.unshuffle = nn.PixelUnshuffle(self.downscale_ratio)
 
     @torch.jit.script_method
     def forward(self, x):
@@ -54,7 +63,15 @@ class DownSampleConv2D(torch.jit.ScriptModule):
         # 3. Take the average across dimension 0, apply convolution,
         # and return the output
         ##################################################################
-        pass
+        
+        x = self.unshuffle(x)
+
+        x = x.view(int(self.downscale_ratio**2), x.size(0), int(x.size(1)/(int(self.downscale_ratio**2))), x.size(2), x.size(3))
+
+        x = x.mean(dim=0)
+
+        return self.conv(x)
+
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -79,11 +96,23 @@ class ResBlockUp(torch.jit.ScriptModule):
     """
 
     def __init__(self, input_channels, kernel_size=3, n_filters=128):
+
         super(ResBlockUp, self).__init__()
         ##################################################################
         # TODO 1.1: Setup the network layers
         ##################################################################
-        self.layers = None
+        
+        self.layers = nn.Sequential(
+
+            nn.BatchNorm2d(input_channels),
+            nn.ReLU(),
+            nn.Conv2d(input_channels, n_filters, kernel_size=kernel_size, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(n_filters),
+            nn.ReLU(),
+            UpSampleConv2D(n_filters, n_filters=n_filters, kernel_size=kernel_size, padding=1)
+        )
+
+        self.upsample_residual = UpSampleConv2D(input_channels, n_filters=n_filters, kernel_size=1)
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -95,7 +124,13 @@ class ResBlockUp(torch.jit.ScriptModule):
         # connection. Make sure to upsample the residual before adding it
         # to the layer output.
         ##################################################################
-        pass
+
+        residual = self.upsample_residual(x)
+
+        out = self.layers(x)
+
+        return out + residual
+
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -122,7 +157,14 @@ class ResBlockDown(torch.jit.ScriptModule):
         ##################################################################
         # TODO 1.1: Setup the network layers
         ##################################################################
-        self.layers = None
+        self.layers = nn.Sequential(
+            nn.ReLU(),
+            nn.Conv2d(input_channels, n_filters, kernel_size=kernel_size, stride=1, padding=1),
+            nn.ReLU(),
+            DownSampleConv2D(n_filters, kernel_size=3, n_filters=n_filters, padding=1),
+        )
+
+        self.downsample_residual = DownSampleConv2D(input_channels, kernel_size=1, n_filters=n_filters)
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -134,7 +176,14 @@ class ResBlockDown(torch.jit.ScriptModule):
         # connection. Make sure to downsample the residual before adding
         # it to the layer output.
         ##################################################################
-        pass
+
+        out = self.layers(x)
+
+        
+        residual = self.downsample_residual(x)
+
+
+        return out + residual
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -157,7 +206,12 @@ class ResBlock(torch.jit.ScriptModule):
         ##################################################################
         # TODO 1.1: Setup the network layers
         ##################################################################
-        self.layers = None
+        self.layers = nn.Sequential(
+            nn.ReLU(), 
+            nn.Conv2d(input_channels, n_filters, kernel_size=kernel_size, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(n_filters, n_filters, kernel_size=kernel_size, stride=1, padding=1),
+        )
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -168,7 +222,9 @@ class ResBlock(torch.jit.ScriptModule):
         # TODO 1.1: Forward the conv layers. Don't forget the residual
         # connection!
         ##################################################################
-        pass
+        out = self.layers(x)
+
+        return out + x
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -237,8 +293,21 @@ class Generator(torch.jit.ScriptModule):
         # TODO 1.1: Set up the network layers. You should use the modules
         # you have implemented previously above.
         ##################################################################
-        self.dense = None
-        self.layers = None
+
+        self.starting_image_size = starting_image_size
+
+        self.dense = nn.Linear(in_features=128, out_features=starting_image_size*starting_image_size*128, bias=True)
+        
+        self.layers = nn.Sequential(
+
+            ResBlockUp(128, n_filters=128),
+            ResBlockUp(128, n_filters=128),
+            ResBlockUp(128, n_filters=128),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 3, kernel_size=3, stride=1, padding=1),
+            nn.Tanh()
+        )
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -250,7 +319,13 @@ class Generator(torch.jit.ScriptModule):
         # been passed in. Don't forget to re-shape the output of the dense
         # layer into an image with the appropriate size!
         ##################################################################
-        pass
+        x = self.dense(z)
+
+        x = x.view(x.size(0), 128, self.starting_image_size, self.starting_image_size)
+
+        x = self.layers(x)
+
+        return x
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -261,7 +336,11 @@ class Generator(torch.jit.ScriptModule):
         # TODO 1.1: Generate n_samples latents and forward through the
         # network.
         ##################################################################
-        pass
+        z = torch.randn(n_samples, 128).cuda()
+
+        generated_images = self.forward_given_samples(z)
+
+        return generated_images
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -325,8 +404,15 @@ class Discriminator(torch.jit.ScriptModule):
         # TODO 1.1: Set up the network layers. You should use the modules
         # you have implemented previously above.
         ##################################################################
-        self.dense = None
-        self.layers = None
+        self.dense = nn.Linear(in_features=128, out_features=1, bias=True)
+        self.layers = nn.Sequential(
+            ResBlockDown(3, n_filters=128),
+            ResBlockDown(128, n_filters=128),
+            ResBlock(128, n_filters=128),
+            ResBlock(128, n_filters=128),
+            nn.ReLU()
+        )
+
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
@@ -338,7 +424,14 @@ class Discriminator(torch.jit.ScriptModule):
         # have been passed in. Make sure to sum across the image
         # dimensions after passing x through self.layers.
         ##################################################################
-        pass
+        
+        x = self.layers(x)
+
+        x = x.sum(dim=[2, 3])
+
+        x = self.dense(x)
+
+        return x.squeeze()
         ##################################################################
         #                          END OF YOUR CODE                      #
         ##################################################################
